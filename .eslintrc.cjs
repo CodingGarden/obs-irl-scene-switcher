@@ -10,4 +10,7 @@ module.exports = {
   parserOptions: {
     ecmaVersion: 'latest',
   },
+  rules: {
+    'vuejs-accessibility/role-has-required-aria-props': 0,
+  },
 };

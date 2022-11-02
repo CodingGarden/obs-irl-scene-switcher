@@ -12,12 +12,13 @@
   "dependencies": {
     "obs-websocket-js": "^5.0.2",
     "pinia": "^2.0.23",
+    "tmi.js": "^1.8.5",
     "vue": "^3.2.41"
   },
   "devDependencies": {
     "@rushstack/eslint-patch": "^1.1.4",
     "@types/node": "^16.11.68",
-    "@types/obs-studio": "^2.17.0",
+    "@types/tmi.js": "^1.8.2",
     "@vitejs/plugin-vue": "^3.1.2",
     "@vue/eslint-config-airbnb-with-typescript": "^7.0.0",
     "@vue/eslint-config-prettier": "^7.0.0",
