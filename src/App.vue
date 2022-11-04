@@ -7,7 +7,7 @@ import * as tmi from 'tmi.js';
 
 import type OBSScene from '@/interfaces/OBSScene';
 import reactiveFromLocalStorage from '@/lib/reactiveLocalStorage';
-import type SRTStats from '@/interfaces/SRTStats';
+import SRTStatsMonitor from '@/lib/SRTStatsMonitor';
 
 let client = new tmi.Client({});
 
@@ -24,10 +24,8 @@ const sceneSwitchSettings = reactiveFromLocalStorage({
   key: 'sceneSwitchSettings',
   initialValue: {
     mainSceneName: '',
-    lowBitrateSceneName: '',
+    packetLossSceneName: '',
     beRightBackSceneName: '',
-    lowBitrateThreshold: 1000,
-    sceneSwitchDelaySeconds: 3.5,
   },
   watchValue: true,
 });
@@ -41,7 +39,6 @@ const srtLiveServerSettings = reactiveFromLocalStorage({
   key: 'srtLiveServerSettings',
   initialValue: {
     statsUrl: 'http://localhost:8181/stats',
-    pollRateSeconds: 1,
     streamId: 'publish/live/feed1',
   },
   watchValue: true,
@@ -112,69 +109,84 @@ onMounted(() => {
   }
 });
 
-let stats: SRTStats | null = null;
-async function getSRTStats() {
-  if (!srtPolling.value) return;
-  const response = await fetch(srtLiveServerSettings.statsUrl);
-  stats = (await response.json()) as SRTStats;
-  if (
-    Object.hasOwn(stats.publishers, srtLiveServerSettings.streamId)
-    && [
-      sceneSwitchSettings.lowBitrateSceneName,
-      sceneSwitchSettings.mainSceneName,
-      sceneSwitchSettings.beRightBackSceneName,
-    ].includes(obsState.currentSceneName)
-  ) {
-    if (
-      stats.publishers[srtLiveServerSettings.streamId].bitrate
-      < sceneSwitchSettings.lowBitrateThreshold
-    ) {
-      if (
-        obsState.currentSceneName !== sceneSwitchSettings.lowBitrateSceneName
-      ) {
-        obs.call('SetCurrentProgramScene', {
-          sceneName: sceneSwitchSettings.lowBitrateSceneName,
-        });
-        client.say(botSettings.channelName, 'Low Bitrate Detected: Switching to "Low Bitrate" Scene');
-      }
-    } else if (
-      obsState.currentSceneName !== sceneSwitchSettings.mainSceneName
-    ) {
-      obsState.currentSceneName = sceneSwitchSettings.mainSceneName;
-      setTimeout(() => {
-        obs.call('SetCurrentProgramScene', {
-          sceneName: sceneSwitchSettings.mainSceneName,
-        });
-        client.say(botSettings.channelName, 'Connected! Switching to "Main" Scene');
-      }, sceneSwitchSettings.sceneSwitchDelaySeconds * 1000);
-    }
-  } else if (
-    [
-      sceneSwitchSettings.lowBitrateSceneName,
-      sceneSwitchSettings.mainSceneName,
-    ].includes(obsState.currentSceneName)
-    && obsState.currentSceneName !== sceneSwitchSettings.beRightBackSceneName
-  ) {
-    obs.call('SetCurrentProgramScene', {
-      sceneName: sceneSwitchSettings.beRightBackSceneName,
-    });
-    client.say(botSettings.channelName, 'Disconnected... Switching to "Be Right Back" Scene');
-  }
-  if (srtPolling.value) {
-    setTimeout(getSRTStats, srtLiveServerSettings.pollRateSeconds * 1000);
+const statsMonitor = new SRTStatsMonitor();
+
+let sceneMessageTimeout = -1;
+function switchSceneAndNotify({
+  sceneName,
+  message,
+}: {
+  sceneName: string;
+  message: string;
+}) {
+  obsState.currentSceneName = sceneName;
+  obs.call('SetCurrentProgramScene', {
+    sceneName,
+  });
+  if (botSettings.enabled) {
+    clearTimeout(sceneMessageTimeout);
+    sceneMessageTimeout = setTimeout(() => {
+      client.say(botSettings.channelName, message);
+    }, 1500);
   }
 }
 
-function sendBitrateInChat() {
+async function getSRTStats() {
   if (!srtPolling.value) return;
-  if (stats && stats.publishers[srtLiveServerSettings.streamId]) {
-    client.say(botSettings.channelName, `Current bitrate: ${stats?.publishers[srtLiveServerSettings.streamId].bitrate}`);
+  await statsMonitor.getNextStats();
+  const onValidScene = [
+    sceneSwitchSettings.mainSceneName,
+    sceneSwitchSettings.packetLossSceneName,
+    sceneSwitchSettings.beRightBackSceneName,
+  ].includes(obsState.currentSceneName);
+  const connected = !!statsMonitor.currentPublisher.value;
+  const connectedAndShouldSwitch = connected && onValidScene;
+  if (
+    connectedAndShouldSwitch
+    && statsMonitor.avgPktRcvDrops.value <= 5
+    && obsState.currentSceneName !== sceneSwitchSettings.mainSceneName
+  ) {
+    switchSceneAndNotify({
+      sceneName: sceneSwitchSettings.mainSceneName,
+      message: '✅ Good Connection!',
+    });
+  } else if (
+    connectedAndShouldSwitch
+    && statsMonitor.avgPktRcvDrops.value > 5
+    && obsState.currentSceneName !== sceneSwitchSettings.packetLossSceneName
+  ) {
+    switchSceneAndNotify({
+      sceneName: sceneSwitchSettings.packetLossSceneName,
+      message: '⚠️ Packet Loss Detected...',
+    });
+  } else if (
+    !connected
+    && onValidScene
+    && obsState.currentSceneName !== sceneSwitchSettings.beRightBackSceneName
+  ) {
+    switchSceneAndNotify({
+      sceneName: sceneSwitchSettings.beRightBackSceneName,
+      message: '⛔️ Disconnected...',
+    });
   }
-  setTimeout(sendBitrateInChat, 60 * 1000);
+  if (srtPolling.value) {
+    setTimeout(getSRTStats, 1000);
+  }
+}
+
+function sendStats() {
+  if (!srtPolling.value) return;
+
+  if (obsState.currentSceneName === sceneSwitchSettings.packetLossSceneName) {
+    client.say(botSettings.channelName, `📉 Packet Loss: ${statsMonitor.avgPktRcvDrops.value}/s`);
+  }
+
+  setTimeout(sendStats, 5000);
 }
 
 function startSRTPolling() {
   srtPolling.value = true;
+  statsMonitor.settings = srtLiveServerSettings;
   if (botSettings.enabled) {
     client = new tmi.Client({
       identity: {
@@ -189,23 +201,30 @@ function startSRTPolling() {
       if (!botSettings.permissions.public && isPublicUser) return;
       if (!botSettings.permissions.moderator && isModerator) return;
       if (message === '!bitrate') {
-        if (stats && stats.publishers[srtLiveServerSettings.streamId]) {
-          client.say(botSettings.channelName, `Current bitrate: ${stats?.publishers[srtLiveServerSettings.streamId].bitrate}`);
+        if (statsMonitor.currentPublisher.value) {
+          client.say(botSettings.channelName, `Current bitrate: ${statsMonitor.currentPublisher.value.bitrate} Kb/s`);
         } else {
           client.say(botSettings.channelName, 'Bitrate not available...');
         }
       } else if (message === '!scene' || message === '!currentscene') {
         client.say(botSettings.channelName, `Current scene: ${obsState.currentSceneName}`);
+      } else if (message === '!stats') {
+        if (statsMonitor.currentPublisher.value) {
+          client.say(botSettings.channelName, `📉 Packet Loss: ${statsMonitor.avgPktRcvDrops}/s`);
+        } else {
+          client.say(botSettings.channelName, 'Stats not available...');
+        }
       }
     });
     client.connect();
-    setTimeout(sendBitrateInChat, 60 * 1000);
   }
   getSRTStats();
+  setTimeout(sendStats, 10000);
 }
 
 function stopSRTPolling() {
   srtPolling.value = false;
+  statsMonitor.clear();
   client.removeAllListeners();
   client.disconnect();
 }
@@ -254,14 +273,6 @@ function stopSRTPolling() {
             id="srtStatsUrl"
             v-model="srtLiveServerSettings.statsUrl"
           />
-          <label for="pollRateSeconds">Stats Poll Rate in Seconds</label>
-          <input
-            :disabled="srtPolling"
-            id="pollRateSeconds"
-            v-model="srtLiveServerSettings.pollRateSeconds"
-            type="number"
-            min="500"
-          />
           <label for="streamId">Stream ID</label>
           <input
             :disabled="srtPolling"
@@ -291,32 +302,17 @@ function stopSRTPolling() {
               {{ scene.sceneName }}
             </option>
           </select>
-          <label for="sceneSwitchDelayMS">Scene Switch Delay in Seconds</label>
-          <input
-            v-model="sceneSwitchSettings.sceneSwitchDelaySeconds"
-            :disabled="srtPolling"
-            id="sceneSwitchDelaySeconds"
-            type="number"
-            min="0"
-          />
           <hr />
-          <label for="lowBitrateSceneName">Low Bitrate Scene</label>
+          <label for="packetLossSceneName">Packet Loss Scene</label>
           <select
-            v-model="sceneSwitchSettings.lowBitrateSceneName"
+            v-model="sceneSwitchSettings.packetLossSceneName"
             :disabled="srtPolling"
-            id="lowBitrateSceneName"
+            id="packetLossSceneName"
           >
             <option v-for="scene in obsState.scenes" :key="scene.sceneName">
               {{ scene.sceneName }}
             </option>
           </select>
-          <label for="lowBitrateThreshold">Low Bitrate Threshold</label>
-          <input
-            v-model="sceneSwitchSettings.lowBitrateThreshold"
-            :disabled="srtPolling"
-            id="lowBitrateThreshold"
-            type="number"
-          />
         </div>
       </details>
       <details>
