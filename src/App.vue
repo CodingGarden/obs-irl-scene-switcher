@@ -33,6 +33,7 @@ const obsState = reactive({
   connected: false,
   currentSceneName: '',
   scenes: [] as OBSScene[],
+  forceBRB: false,
 });
 const srtPolling = ref(false);
 const srtLiveServerSettings = reactiveFromLocalStorage({
@@ -134,6 +135,19 @@ function switchSceneAndNotify({
 async function getSRTStats() {
   if (!srtPolling.value) return;
   await statsMonitor.getNextStats();
+  if (
+    obsState.forceBRB
+    && obsState.currentSceneName !== sceneSwitchSettings.beRightBackSceneName
+  ) {
+    switchSceneAndNotify({
+      sceneName: sceneSwitchSettings.beRightBackSceneName,
+      message: '✌️ Be Right Back!',
+    });
+    if (srtPolling.value) {
+      setTimeout(getSRTStats, 1000);
+    }
+    return;
+  }
   const onValidScene = [
     sceneSwitchSettings.mainSceneName,
     sceneSwitchSettings.packetLossSceneName,
@@ -181,7 +195,7 @@ function sendStats() {
     client.say(botSettings.channelName, `📉 Packet Loss: ${statsMonitor.avgPktRcvDrops.value}/s`);
   }
 
-  setTimeout(sendStats, 5000);
+  setTimeout(sendStats, 10 * 1000);
 }
 
 function startSRTPolling() {
@@ -191,7 +205,7 @@ function startSRTPolling() {
     client = new tmi.Client({
       identity: {
         username: botSettings.botName,
-        password: botSettings.oauthToken.startsWith('oauth:') ? botSettings.oauthToken : `oauth:${botSettings.oauthToken}`,
+        password: botSettings.oauthToken,
       },
       channels: [botSettings.channelName],
     });
@@ -210,16 +224,20 @@ function startSRTPolling() {
         client.say(botSettings.channelName, `Current scene: ${obsState.currentSceneName}`);
       } else if (message === '!stats') {
         if (statsMonitor.currentPublisher.value) {
-          client.say(botSettings.channelName, `📉 Packet Loss: ${statsMonitor.avgPktRcvDrops}/s`);
+          client.say(botSettings.channelName, `📈 Bitrate: ${statsMonitor.currentPublisher.value.bitrate} Kb/s | 📉 Packet Loss: ${statsMonitor.avgPktRcvDrops}/s`);
         } else {
           client.say(botSettings.channelName, 'Stats not available...');
         }
+      } else if (message === '!brb') {
+        obsState.forceBRB = true;
+      } else if (message === '!golive') {
+        obsState.forceBRB = false;
       }
     });
     client.connect();
   }
   getSRTStats();
-  setTimeout(sendStats, 10000);
+  setTimeout(sendStats, 10 * 1000);
 }
 
 function stopSRTPolling() {

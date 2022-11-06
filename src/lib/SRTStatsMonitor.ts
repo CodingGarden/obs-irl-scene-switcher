@@ -23,14 +23,14 @@ export default class SRTStatsMonitor {
 
   avgPktRcvDrops = computed(
     () => this.pktRcvDrops.value.length
-      && this.pktRcvDrops.value.reduce((sum, value) => sum + value, 0)
-        / this.pktRcvDrops.value.length,
+      && Math.floor(this.pktRcvDrops.value.reduce((sum, value) => sum + value, 0)
+        / this.pktRcvDrops.value.length),
   );
 
   avgPktRcvLosses = computed(
     () => this.pktRcvLosses.value.length
-      && this.pktRcvLosses.value.reduce((sum, value) => sum + value, 0)
-        / this.pktRcvLosses.value.length,
+      && Math.floor(this.pktRcvLosses.value.reduce((sum, value) => sum + value, 0)
+        / this.pktRcvLosses.value.length),
   );
 
   currentPublisher = computed(
